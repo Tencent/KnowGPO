@@ -29,6 +29,7 @@
 
 ## 🎉 News
 
+- **November 01, 2026:** [KnowGPO: Knowledge-Grouped Policy Optimization for Search Agents](https://aclanthology.org/2026.emnlp-main.2357/) has been accepted to EMNLP 2026.
 - **October 15, 2026:** [KnowGPO: Knowledge-Grouped Policy Optimization for Search Agents](https://arxiv.org/abs/2610.22331) is available on arXiv.
 
 ## 🌟 Highlights
