@@ -1,0 +1,194 @@
+# ============================================================
+# RGC (Rubric-Guided Grouping with Counterfactual Reward)
+# + Plan B: intra-group length penalty
+# ============================================================
+#
+# For ApiPrimeDapoTrajectoryV4RGCRewardManager
+#
+# Core mechanics:
+#   1. Rubric states are used ONLY for grouping steps within the same query
+#      (group_key = (uid, tuple(rubric_state))).
+#   2. Value per member = R_final (optionally shrunk in "saturating" mode).
+#   3. Plan B: within each group, compute a z-score of the *trajectory total
+#      length* and mix it into the joint value:
+#        v_joint_i = R_final_i - alpha * (L_i - L_mean) / (L_std + eps)
+#   4. Final A_S = (v_joint - group_mean) / (group_std + eps).
+#   5. Downstream trainer fuses A_E and A_S using advantage_fusion_mode:
+#        "convex":   A_final = (1-ω)·A_E_norm + ω·A_S_norm    (default, ω=0.3)
+#        "additive": A_final = A_E_norm + ω·A_S_norm          (legacy)
+#
+# Why this works with GRPO:
+#   - A_E handles query-level outcome variance ((R - mean) / std across query).
+#   - A_S handles state-conditional decision quality, now including a
+#     length-efficiency dimension, and is itself z-score normalized so its
+#     scale is compatible with A_E.
+#   - Singleton groups collapse to A_S=0, letting A_E carry the full signal.
+#   - Overlong samples are isolated via enable_overlong_isolation=True so
+#     that truncated garbage trajectories never poison legitimate groups.
+# ============================================================
+
+# ============================================================
+# LLM API Configuration (reused from V3)
+# ============================================================
+reward_api_provider: "vendor_a"
+reward_api_key: null  # Supply via KNOWGPO_JUDGE_API_KEY environment variable.
+reward_api_model: "set-via-KNOWGPO_JUDGE_MODEL"
+reward_api_fallback_models: null
+reward_api_global_timeout: 600
+
+step_api_provider: "vendor_a"
+step_api_key: null  # Supply via KNOWGPO_JUDGE_API_KEY environment variable.
+step_api_model: "set-via-KNOWGPO_JUDGE_MODEL"
+step_api_fallback_models: null
+step_api_global_timeout: 600
+
+val_api_provider: "vendor_a"
+val_api_key: null  # Supply via KNOWGPO_JUDGE_API_KEY environment variable.
+val_api_model: "set-via-KNOWGPO_JUDGE_MODEL"
+val_api_fallback_models: null
+val_api_global_timeout: 600
+
+# ============================================================
+# RGC core
+# ============================================================
+enable_process_reward: true
+
+# --- Advantage fusion (consumed by ray_trainer.py) ------------
+# How to combine episode-level advantage A_E (GRPO) and step-level
+# advantage A_S (RGC) into the final PPO advantage.
+#
+#   "convex"   (DEFAULT):  A_final = (1 - omega) * A_E_norm + omega * A_S_norm
+#                          — convex combination, total coefficient = 1.
+#                          Strictly matches "w * R + (1 - w) * P" semantics
+#                          with w = (1 - omega). Recommended for Plan B.
+#
+#   "additive" (LEGACY):   A_final = A_E_norm + omega * A_S_norm
+#                          — additive; A_E always keeps full weight.
+#                          Use only if you want to reproduce old experiments.
+#
+# When switching to "convex", keep in mind that the overall advantage
+# magnitude drops by ~(1-omega) compared to the legacy additive form.
+# Consider compensating via a larger learning rate or clip_ratio.
+advantage_fusion_mode: "convex"
+
+# Weight of the step-level advantage A_S in the fusion.
+#   convex  : omega ∈ [0, 1], with omega=0 → pure GRPO, omega=1 → pure RGC.
+#   additive: omega ≥ 0, arbitrary scale multiplier.
+#
+# For the "convex" mode, omega = 0.3 means "70% outcome + 30% process"
+# which is a conservative introduction of the RGC signal. Bump to 0.4~0.5
+# once training is stable.
+process_reward_omega: 0.3
+
+# --- External evaluator temperature (HARD CONTRACT, do NOT change) ---
+# All external LLM calls used for evaluation (rubric-state judge in Phase A,
+# answer judge in C-GRPO) MUST use temperature=0 so that:
+#   1. Same (trajectory, rubric) input always produces the same output,
+#      guaranteeing that (uid, rubric_state) group keys are stable across
+#      mini-batches.
+#   2. The state monotonicity correction sees no phantom reversals caused
+#      by sampling noise.
+# This value is read by the V4 RGC RewardManager at init time and logged
+# as a startup assertion. If you ever need to raise it (e.g. to 0.1) for
+# an ablation, do it here explicitly and monitor phase_a/state_reversal_rate.
+external_eval_temperature: 0.0
+
+# ============================================================
+# Plan B: intra-group length penalty
+# ============================================================
+# Mode: "none" | "group_zscore" | "saturating"
+#   - "none":          v = R_final (pure RGC).
+#   - "group_zscore":  v_joint = R_final - alpha * (L - L_mean) / (L_std + eps)
+#                      (RECOMMENDED, fair intra-group comparison).
+#   - "saturating":    v = R_final * (1 - alpha * saturate(L, target))
+#                      (coarser, only shrinks correct long trajectories).
+length_penalty_mode: "group_zscore"
+
+# Strength of the length signal relative to R_final (which is 0 or 1).
+# Recommended range: 0.1 ~ 0.5.
+# Note: the z-score-mode offset has std ~1 per group, so alpha≈0.3 means
+# the penalty for a "1-sigma long" trajectory is ~0.3 of the outcome scale.
+length_penalty_alpha: 0.3
+
+# Used only in "saturating" mode. Ramp starts at `target`, saturates at 2*target.
+length_penalty_target: 8
+
+# Need at least this many members in a group before applying length penalty.
+# With 2 we always apply (if std>0); with 3 we are slightly more conservative
+# when group samples are sparse.
+length_min_group_size: 2
+
+# If True: only apply length penalty to CORRECT trajectories. This prevents
+# the penalty from further discouraging long (but wrong) exploration, which
+# could worsen the "search avoidance" failure mode seen in IGPO badcases.
+# Recommended: False for "group_zscore" (we want short AND correct), True
+# for "saturating" if you worry about avoidance.
+length_excl_correct_only: true
+
+# Legacy per-step-position shrink (kept OFF by default).
+# When >0: v -= efficiency_penalty_alpha * (step_idx / (total_steps-1)).
+efficiency_penalty_alpha: 0.0
+
+# ============================================================
+# Unused in RGC (explicitly commented for clarity)
+# ============================================================
+# process_reward_gamma: NOT USED (no discounted returns in RGC).
+# cgrpo_alpha:          NOT USED (no C-GRPO rubric-reward mixing).
+
+# ============================================================
+# Dynamic omega scheduling (optional; consumed by ray_trainer.py)
+# ============================================================
+# Only meaningful for advantage_fusion_mode = "convex":
+#   omega starts at omega_start, linearly decays to omega_end over training.
+#   Useful for "warm-up process signal, then fade out" schedules.
+enable_dynamic_omega: false
+omega_start: 0.3
+omega_end: 0.1
+omega_warmup_ratio: 0.0
+
+# ============================================================
+# Concurrency / timeouts
+# ============================================================
+num_workers: 32
+max_retries: 5
+timeout: 6000.0
+debug: false
+default_score: 0
+
+# ============================================================
+# Grouping details dump (offline inspection)
+# ============================================================
+dump_grouping_details: false
+dump_max_queries: 0
+dump_dir: ""  # Optional: set a writable path to enable dumps.
+dump_step_text_max_chars: 0
+
+# ============================================================
+# Batch filtering / isolation (reused from V3 - DO NOT change)
+# ============================================================
+# Filters degenerate groups in ray_trainer (all-correct / all-wrong).
+enable_group_filtering: true
+# Assign unique UIDs to overlong samples so they never share a group
+# with normal samples. Critical for sound RGC advantages.
+enable_overlong_isolation: true
+
+# ============================================================
+# Tuning tips
+# ============================================================
+#
+#   (A) First training run: use these defaults.
+#   (B) If model still over-searches:
+#         - bump length_penalty_alpha to 0.4~0.5, or
+#         - switch to "saturating" mode with target=6.
+#   (C) If model starts under-searching (more search_nums=0):
+#         - lower length_penalty_alpha to 0.15~0.2, or
+#         - set length_excl_correct_only=true, or
+#         - bump length_min_group_size to 3 (only penalize when we have
+#           enough group samples to be confident).
+#   (D) Always watch these wandb metrics:
+#         rgc/effective_groups           - must stay >> singleton_groups
+#         rgc/length_active_groups       - >0 means Plan B actually fired
+#         rgc/mean_step_advantage        - should be roughly 0
+#         rgc/std_step_advantage         - should be ~0.7~1.0 (z-score scale)
+#         rgc/mean_length_offset_abs     - how skewed the lengths are per group
+# ============================================================

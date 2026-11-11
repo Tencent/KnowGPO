@@ -1,0 +1,24 @@
+tools:
+  - class_name: verl.tools.search_tool.SearchTool
+    config:
+      retrieval_service_url: ${oc.env:KNOWGPO_SEARCH_URL}
+      num_workers: 6
+      rate_limit: 6
+      timeout: 15
+      type: native
+      topk: 10
+    tool_schema:
+      type: function
+      function:
+        name: search
+        description: Search the web for information. The result will be a string.
+        parameters:
+          type: object
+          properties:
+            query_list:
+              type: array
+              item:
+                type: string
+              description: "Generate up to 5 search queries based on the requirements below:\n\nAll search queries should use generalized, search engine-friendly, and easily retrievable keywords to improve search efficiency and the relevance of results. Avoid directly extracting phrases from the question that are difficult to retrieve effectively. For example: Avoid using relative or ambiguous terms such as 'third author' or 'the following year.' - Instead, use more universal expressions like 'author list' or 'award history.'\nFor a single search query, keep them short - remove unnecessary auxiliary words, conjunctions, and interrogative words. Primarily use keyword combinations (separated by spaces). Ideally, they should not exceed 15 characters. Avoid using special punctuation marks.\nWhen seeking information from non-English primary sources, adjust search query to retrieve content in the original language (e.g., chinese), even if your initial question is in English. This improves accuracy and avoids translation-related errors.\nYou can search 1 to 5 search queries in parallel each time. If the question involves comparing multiple entities (e.g., people, places, books, movies) or contains two or more sub-questions, please split it into separate queries for each entity or sub-question.\nDo not re-search for queries that have already been searched."
+          required:
+            - query_list

@@ -1,0 +1,143 @@
+# ============================================================
+# V7: RGC-IR (Rubric-Grouped Immediate Reward, Final-step exempt)
+# ============================================================
+#
+# For ApiPrimeDapoTrajectoryV7RGCIRRewardManager.
+#
+# This YAML OVERLAYS reward_dapo_trajectory_v4_rgc.yaml. All fields not
+# external_eval_temperature, etc.) are inherited from the V4 yaml.
+#
+# ---------------- Algorithm semantics ----------------
+#   Grouping key:   (uid, tuple(pre-action rubric_state))
+#                   NON-FINAL steps only. The final <answer> step is
+#                   NOT part of any rubric-state group.
+#
+#   Step value v_t: r_t = ||s_t||_1 - ||s_{t-1}||_1        (non-final)
+#                   "How many new rubrics did THIS step unlock?"
+#                   s_{-1} := 0 (virtual all-zero pre-state for step 0).
+#
+#   Final step:     A_S hard-pinned to 0. Outcome signal is carried by
+#                   the episode-level GRPO advantage A_E.
+#
+#   Within-group:   z-score (v - mean) / (std + eps), std with ddof=1.
+#
+#   Fusion:         "convex_final_exempt" (consumed by ray_trainer.py):
+#                     non-final tokens: (1 - omega) * A_E_norm + omega * A_S_norm
+#                     final    tokens: A_E             (raw, unattenuated)
+#                   -> answer-span gradient is NOT attenuated by (1 - omega);
+#                   -> outcome is NOT double-counted through A_S.
+#
+# ---------------- Why this shape ----------------
+#   * r_t is the natural step value under rubric-state grouping:
+#     "Given the same pre-action coverage, how much did each trajectory's
+#      current action add to the rubric coverage?" This is exactly what
+#      (uid, s_{t-1}) groups were defined to compare.
+#   * Telescoping sum: sum_t r_t = ||s_{T-2}||_1 (final coverage).
+#     -> Short correct paths and long correct paths with the same final
+#        coverage receive the same TOTAL process reward, but the short
+#        one concentrates it on fewer steps and therefore dominates every
+#        group z-score. This is an IMPLICIT short-path preference with
+#        NO hand-tuned length penalty coefficient.
+#   * Excluding the final step from grouping avoids (a) mixing "increment"
+#     and "outcome" semantics in one slot and (b) double-counting R_final
+#     through both A_E (over uid) and A_S (over s_{T-2}).
+#   * convex_final_exempt is the unique fusion that preserves full A_E on
+#     answer tokens while still letting A_S redistribute a fraction of the
+#     gradient on the non-final (search / reason) tokens where rubric-state
+#     grouping has signal.
+#
+# ---------------- Known trade-offs ----------------
+#   * If zero_increment_ratio (= fraction of r_t == 0) is very high (>0.7),
+#     the rubric set is too coarse for step-level discrimination. Lower
+#     omega to 0.15 or split the rubrics into finer checkpoints.
+#   * V7 does NOT use gamma (rgc_gigpo_gamma / process_reward_gamma are
+#     both ignored). Setting them has no effect.
+#
+# ============================================================
+
+
+# ============================================================
+# V7 core switches (consumed by V7 reward manager)
+# ============================================================
+
+# Which Phase B implementation to route to.
+#   "rgc_immediate_reward" (DEFAULT) -> compute_rgc_ir_phase_b         [V7]
+#   "gigpo_return"                   -> compute_rgc_gigpo_phase_b      [=V6]
+#   "rgc_plan_b"                     -> compute_rgc_phase_b            [=V4]
+#
+# V7 will emit a warning if you change this to anything other than the
+# default, since the V7 class name would become misleading.
+value_function_mode: "rgc_immediate_reward"
+
+# ============================================================
+# Fusion (consumed by ray_trainer.py Module 4)
+# ============================================================
+# V7 REQUIRES "convex_final_exempt". The reward manager will forcibly
+# override any other value set here and emit a warning.
+advantage_fusion_mode: "convex_final_exempt"
+
+# Weight of the step-level advantage A_S on NON-FINAL tokens.
+#   convex_final_exempt: omega in [0, 1].
+#     0   -> pure GRPO (A_S ignored).
+#     0.3 -> 70% outcome + 30% process on non-final tokens. Recommended.
+#     1.0 -> process-only on non-final tokens (uncommon).
+process_reward_omega: 0.3
+
+# Dynamic omega scheduling (optional). NOT recommended for V7 main runs;
+# enable only for scheduling ablations.
+enable_dynamic_omega: false
+omega_start: 0.3
+omega_end: 0.3
+omega_warmup_ratio: 0.0
+
+# ============================================================
+# Length penalty: HARD-DISABLED for V7
+# ============================================================
+# The telescoping sum of r_t already encodes a strong short-path
+# preference. Adding a length term would double-penalize length and
+# damage the clean semantics. The reward manager forces these off on
+# startup; they are listed here for documentation only.
+length_penalty_mode: "none"
+length_penalty_alpha: 0.0
+length_penalty_target: 0
+length_min_group_size: 2
+length_excl_correct_only: false
+efficiency_penalty_alpha: 0.0
+
+# ============================================================
+# Dump directory (isolated from V4/V6 so comparison runs do not
+# clobber each other's offline grouping dumps).
+# ============================================================
+dump_dir: ""  # Optional: set a writable path to enable dumps.
+
+# ============================================================
+# Notes on fields NOT listed here (inherited from V4 yaml):
+#   reward_api_* / step_api_* / val_api_*   : LLM judge endpoints
+#   num_workers / max_retries / timeout     : async concurrency knobs
+#   external_eval_temperature               : HARD-PINNED to 0.0 for
+#                                             rubric idempotency
+#   dump_grouping_details / dump_max_queries / dump_step_text_max_chars
+#   enable_group_filtering                  : keeps V3's group filtering
+#   enable_overlong_isolation               : keeps overlong UID isolation
+#   enable_process_reward                   : must stay true
+#   default_score / debug                   : V3 defaults
+# ============================================================
+
+# ============================================================
+# Tuning checklist for V7
+# ============================================================
+#   (A) First run: use these defaults and watch
+#         rgc_ir/signal_ratio           -> should be > 0.3
+#         rgc_ir/mean_immediate_reward  -> batch-level mean of r_t
+#         rgc_ir/zero_increment_ratio   -> if >0.7 the rubric set is too coarse
+#         rgc_ir/mean_step_advantage    -> should be ~ 0
+#         rgc_ir/std_step_advantage     -> should be ~ 0.7-1.0
+#         gig/fusion_mode_is_convex_final_exempt -> should equal 1.0
+#         gig/answer_advantage_mean     -> != nonfinal_advantage_mean is expected
+#   (B) If training diverges (fused_advantage_std explodes):
+#         - drop process_reward_omega to 0.15
+#         - verify external_eval_temperature is still 0.0
+#   (C) If signal is too weak (A_S near zero on most steps):
+#         - bump process_reward_omega to 0.4-0.5
+#         - check whether the rubric set over-fires (increment often = 0)
+# ============================================================

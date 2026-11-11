@@ -1,0 +1,157 @@
+# ============================================================
+# Group-in-Group (GiG) GRPO Reward Manager Configuration
+# ============================================================
+#
+# For ApiPrimeDapoTrajectoryV3GiGRewardManager
+# Extends C-GRPO with step-level process rewards
+#
+# Version: 3.0.0
+# Date: 2026-03-09
+# ============================================================
+
+# ============================================================
+# LLM API Configuration
+# ============================================================
+# All API parameters (provider, key, model, fallback_models, global_timeout)
+# are defined here as defaults. They can be overridden via run_train.sh
+# command-line arguments (+reward_model.reward_kwargs.xxx=...).
+# Defining them here avoids Hydra "Ambiguous value" errors for
+# comma-separated fallback_models strings.
+
+# --- Reward API (for end-to-end reward scoring, browsecomp_zh) ---
+reward_api_provider: "vendor_a"
+reward_api_key: null  # Supply via KNOWGPO_JUDGE_API_KEY environment variable.
+reward_api_model: "set-via-KNOWGPO_JUDGE_MODEL"
+reward_api_fallback_models: null
+reward_api_global_timeout: 600
+
+# --- Step API (for step-level state evaluation, process_reward_gig) ---
+step_api_provider: "vendor_a"
+step_api_key: null  # Supply via KNOWGPO_JUDGE_API_KEY environment variable.
+step_api_model: "set-via-KNOWGPO_JUDGE_MODEL"
+# step_eval_model: "deepseek-v3.2"
+step_api_fallback_models: null
+step_api_global_timeout: 600
+
+# --- Val API (for validation set scoring, defaults to reward API if empty) ---
+val_api_provider: "vendor_a"
+val_api_key: null  # Supply via KNOWGPO_JUDGE_API_KEY environment variable.
+val_api_model: "set-via-KNOWGPO_JUDGE_MODEL"
+val_api_fallback_models: null
+val_api_global_timeout: 600
+
+# ============================================================
+# C-GRPO Reward Parameters (inherited from V2)
+# ============================================================
+
+# C-GRPO balance parameter alpha
+# Formula: R_i = (1 - alpha) * R_o + alpha * R_o * R_hat_r
+cgrpo_alpha: 0.3
+
+# ============================================================
+# Group-in-Group (GiG) Process Reward Parameters (NEW)
+# ============================================================
+
+# Enable process reward computation
+enable_process_reward: true
+
+# Discount factor gamma for process reward
+# Controls how much future step rewards are discounted
+# gamma in (0, 1], recommended 0.9~0.99
+process_reward_gamma: 0.95
+
+# Step-level advantage weight omega
+# Controls balance between episode-level (A_E) and step-level (A_S)
+# A = A_E + omega * A_S
+# omega >= 0, recommended 0.1~1.0
+process_reward_omega: 0.3
+
+# Dynamic omega scheduling
+# When enabled, omega linearly decays from omega_start to omega_end
+# over the course of training based on global_steps / total_training_steps
+enable_dynamic_omega: false
+omega_start: 0.5
+omega_end: 0.1
+omega_warmup_ratio: 0.0
+
+# ============================================================
+# Concurrency Configuration
+# ============================================================
+
+# Number of concurrent workers for API calls
+num_workers: 32
+
+# ============================================================
+# End-to-End Evaluation (browsecomp_zh)
+# ============================================================
+
+# Default score when evaluation fails
+default_score: 0
+
+# ============================================================
+# General Configuration
+# ============================================================
+
+# Max retries for LLM API calls
+max_retries: 5
+
+# Timeout in seconds
+timeout: 6000.0
+
+# Enable debug logging
+debug: false
+
+# ============================================================
+# Grouping Details Dump Configuration (NEW)
+# ============================================================
+
+# Whether to dump grouping details to JSONL files for offline inspection
+# Each file contains group info: pre-action state, step texts, rewards, advantages
+dump_grouping_details: false
+
+# Max number of unique query UIDs to dump per training step (0 = all)
+# Set to 0 to dump all queries in the batch (full batch data)
+dump_max_queries: 0
+
+# Directory to write grouping detail files
+# Files are named: grouping_step{NNNNNN}_rank{R}_{timestamp}.jsonl
+# Leave empty to disable dump even if dump_grouping_details is true
+dump_dir: ""  # Optional: set a writable path to enable dumps.
+
+# Max chars for step_text_preview in dump files (0 = full text, no truncation)
+# Set to 0 to disable truncation (full text)
+dump_step_text_max_chars: 0
+
+# ============================================================
+# Batch Filtering Configuration
+# ============================================================
+
+# Enable filtering of all-correct/all-wrong uid groups
+# Groups where all samples have outcome_reward=0 or all=1 are masked out
+enable_group_filtering: true
+
+# Enable overlong sample isolation before advantage computation
+# Overlong samples (exceed_max_tokens=True) are excluded from uid groups
+# so they don't distort normal samples' advantage calculation
+enable_overlong_isolation: true
+
+# ============================================================
+# Notes
+# ============================================================
+#
+# 1. process_reward_gamma:
+#    - Higher gamma (0.99): More weight on future step rewards
+#    - Lower gamma (0.9): More weight on immediate step rewards
+#    - 1.0: No discounting
+#
+# 2. process_reward_omega:
+#    - 0: Only episode-level advantage (original GRPO)
+#    - 0.5: Equal weight for episode and step advantages
+#    - 1.0: Strong step-level signal
+#    - Start with 0.5 and tune based on training dynamics
+#
+# 3. enable_process_reward:
+#    - Set to false to disable process reward (fallback to V2 C-GRPO)
+#    - Useful for A/B testing
+#
+# ============================================================

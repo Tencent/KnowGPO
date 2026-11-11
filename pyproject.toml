@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "knowgpo-training"
+version = "0.1.0"
+description = "KnowGPO reinforcement-learning training chain on a verl fork"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "accelerate",
+  "datasets",
+  "cachetools",
+  "hydra-core",
+  "json-repair",
+  "codetiming",
+  "psutil",
+  "numpy<2",
+  "openai",
+  "packaging>=20",
+  "pandas",
+  "pyarrow>=19",
+  "ray[default]>=2.41",
+  "torch",
+  "torchdata",
+  "tensordict>=0.8,<=0.9.1,!=0.9.0",
+  "transformers",
+  "requests",
+  "tqdm",
+  "pydantic>=2",
+  "httpx",
+  "pyyaml",
+]
+
+[project.optional-dependencies]
+sglang = ["sglang[srt,openai]==0.4.9.post6", "torch==2.7.1"]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["verl*"]
+
+[tool.setuptools.package-data]
+verl = ["trainer/config/**/*.yaml", "trainer/config/*.yaml", "tools/*.yaml", "version/version"]
